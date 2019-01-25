@@ -1,0 +1,6 @@
+# Object Files
+*.o
+
+# Ignore default output directories
+Debug/
+Release/
