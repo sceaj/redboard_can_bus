@@ -111,12 +111,13 @@ int wait_ready (	/* 1:Ready, 0:Timeout */
 
 
 	Timer2 = wt / 10;
-	do
+	do {
 		d = spi_xchg(0xFF);
 
 		/* This loop takes a time. Insert rot_rdq() here for multitask envilonment. */
+		xprintf(PSTR("Timer2 = %d\n"), Timer2);
 
-	while (d != 0xFF && Timer2);
+	} while (d != 0xFF && Timer2);
 
 	return (d == 0xFF) ? 1 : 0;
 }
@@ -144,9 +145,9 @@ static
 int select (void)	/* 1:Successful, 0:Timeout */
 {
 	CS_LOW();		/* Set CS# low */
-	spi_xchg(0xFF);	/* Dummy clock (force DO enabled) */
+	spi_xchg(0xAA);	/* Dummy clock (force DO enabled) */
 
-	if (wait_ready(500)) return 1;	/* Leading busy check: Wait for card ready */
+	if (wait_ready(800)) return 1;	/* Leading busy check: Wait for card ready */
 
 	deselect();		/* Timeout */
 	return 0;
@@ -274,7 +275,7 @@ BYTE send_cmd (		/* Returns R1 resp (bit7==1:Send failed) */
 	do
 		res = spi_xchg(0xFF);
 	while ((res & 0x80) && --n);
-    xprintf(PSTR("command result: %u\n"), res);
+    xprintf(PSTR("command result: 0x%x\n"), res);
 
 	return res;			/* Return with the response value */
 }
@@ -351,6 +352,8 @@ DSTATUS mmc_disk_initialize (void)
 
 	if (ty) {			/* Initialization succeeded */
 		Stat &= ~STA_NOINIT;		/* Clear STA_NOINIT */
+		// Speed up the SPI Clock to maximum (now that SD card initialization is complete)
+		spi_set_clk_div(F_DIV2);
 	} else {			/* Initialization failed */
 		power_off();
 	}

@@ -81,13 +81,15 @@ void spi_init(int master, spi_mode spiMode, spi_clock_div clkDivider) {
 void spi_set_clk_div(spi_clock_div clkDivider) {
 	uint8_t spsr = SPSR;
 	if (clkDivider > 0x03) {
-		spsr |= (clkDivider >> 2);
+		spsr |= 0x01;
+	} else {
+		spsr &= 0xFE;
 	}
-	SPSR = spsr;
 	uint8_t spcr = SPCR;
 	spcr &= 0xFC;
 	spcr |= (clkDivider & 0x03);
 	SPCR = spcr;
+	SPSR = spsr;
 }
 
 /* Send a block of data over SPI *

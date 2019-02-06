@@ -1,6 +1,11 @@
-# Object Files
+# Generated Files
+*.eep
+*.elf
+*.lst
+*.map
 *.o
 
 # Ignore default output directories
+.dep/
 Debug/
 Release/

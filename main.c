@@ -36,6 +36,7 @@
 #include "diskio.h"
 #include "ff.h"
 #include "mcp2515.h"
+#include "sdlogger.h"
 #include "spi.h"
 #include "uart.h"
 #include "xitoa.h"
@@ -49,31 +50,7 @@
 #define O2_VOLTAGE          0x14
 #define THROTTLE			0x11
 
-#define PUT_RC(rc) xprintf(PSTR("rc=%u FR_%s\n"), rc, g_rcMsgs[rc])
-
-FATFS FatFs;		/* Filesystem object for each logical drive */
-FIL File;			/* File object */
-static const char* g_rcMsgs[] = {
-	"OK",
-	"DISK_ERR",
-	"INT_ERR",
-	"NOT_READY",
-	"NO_FILE",
-	"NO_PATH",
-	"INVALID_NAME",
-	"DENIED",
-	"EXIST",
-	"INVALID_OBJECT",
-	"WRITE_PROTECTED",
-	"INVALID_DRIVE",
-	"NOT_ENABLED",
-	"NO_FILE_SYSTEM",
-	"MKFS_ABORTED",
-	"TIMEOUT",
-	"LOCKED",
-	"NOT_ENOUGH_CORE",
-	"TOO_MANY_OPEN_FILES"
-};
+static FATFS FatFs;		/* Filesystem object for each logical drive */
 
 tCAN g_canFrame;
 
@@ -121,51 +98,25 @@ void ecuRequest(uint8_t pid) {
 	}
 }
 
+void logCanFrame(tCAN* canFrame) {
+    appendLog(PSTR("$CAN,%X,%X,%X,%X,%X,%X,%X,%X,%X,%d\n"),
+			canFrame->id, canFrame->data[0], canFrame->data[1], canFrame->data[2], canFrame->data[3],
+			canFrame->data[4], canFrame->data[5], canFrame->data[6], canFrame->data[7], canFrame->header.rtr);
+}
+
 void displayCanFrame(tCAN* canFrame) {
 
-	int16_t engine_data;
-	switch (canFrame->data[2]) { /* Details from http://en.wikipedia.org/wiki/OBD-II_PIDs */
-	case ENGINE_RPM:  			//   ((A*256)+B)/4    [RPM]
-		engine_data = ((canFrame->data[3] * 256) + canFrame->data[4]) / 4;
-		xprintf(PSTR("%d rpm\n"), engine_data);
-		break;
-
-	case ENGINE_COOLANT_TEMP: 	// 	A-40			  [degree C]
-		engine_data = canFrame->data[3] - 40;
-		xprintf(PSTR("%d degC\n"), engine_data);
-		break;
-
-	case VEHICLE_SPEED: 		// A				  [km]
-		engine_data = canFrame->data[3];
-		xprintf(PSTR("%u km\n"), engine_data);
-		break;
-
-	case MAF_SENSOR:   			// ((256*A)+B) / 100  [g/s]
-		engine_data = ((canFrame->data[3] * 256) + canFrame->data[4]) / 100;
-		xprintf(PSTR("%u g/s\n"), engine_data);
-		break;
-
-	case O2_VOLTAGE: // A * 0.005   (B-128) * 100/128 (if B==0xFF, sensor is not used in trim calc)
-		engine_data = canFrame->data[3] * 5;
-		xprintf(PSTR("%u.%03u V\n"), engine_data / 1000, engine_data % 1000);
-		break;
-
-	case THROTTLE:				// Throttle Position
-		engine_data = (canFrame->data[3] * 100) / 255;
-		xprintf(PSTR("%u %%\n"), engine_data);
-		break;
-	default:
-		xprintf(PSTR("CAN id=0x%X data=0x%X 0x%X 0x%X 0x%X 0x%X 0x%X 0x%X 0x%X rtr=%d\n"),
-				canFrame->id, canFrame->data[0], canFrame->data[1], canFrame->data[2], canFrame->data[3],
-				canFrame->data[4], canFrame->data[5], canFrame->data[6], canFrame->data[7], canFrame->header.rtr);
-		break;
-	}
-
+	xprintf(PSTR("CAN id=0x%X data=0x%X 0x%X 0x%X 0x%X 0x%X 0x%X 0x%X 0x%X rtr=%d\n"),
+			canFrame->id, canFrame->data[0], canFrame->data[1],
+			canFrame->data[2], canFrame->data[3], canFrame->data[4],
+			canFrame->data[5], canFrame->data[6], canFrame->data[7],
+			canFrame->header.rtr);
 }
 
 int main(void) {
 
   FRESULT fr;
+  int logging_enabled = 0;
   uint8_t lastUp = 1, up = 1;		// PORTC1
   uint8_t lastLeft= 1, left = 1;	// PORTC2
   uint8_t lastDown = 1, down = 1;	// PORTC3
@@ -179,7 +130,7 @@ int main(void) {
   uart_init(57600l);
   xprintf(PSTR("Hello Sparkfun Redboard!\n"));
 
-  _delay_ms(1000.0);
+  _delay_ms(500.0);
 
   // Configure Joystick pins
   configure_pin(portC, PORTC1, INPUT_WITH_PULLUP);
@@ -189,86 +140,56 @@ int main(void) {
   configure_pin(portC, PORTC5, INPUT_WITH_PULLUP);
 
   // Configure CAN chip-select as OUTPUT and set PIN high
-  configure_pin(&avrPortB, PORTB2, OUTPUT_INIT_HIGH);
+  configure_pin(portB, PORTB2, OUTPUT_INIT_HIGH);
   xprintf(PSTR("CAN CS Pin configured - B2 (D10)\n"));
 
   // Configure SD card chip-select as output and bring it high
-  configure_pin(&avrPortB, PORTB1, OUTPUT_INIT_HIGH);
+  configure_pin(portB, PORTB1, OUTPUT_INIT_HIGH);
   xprintf(PSTR("microSD CS Pin configured - B1 (D9)\n"));
 
   // Initialize SPI hardware - SD card initialization requires SPI clock between 100-400 kHz
+  // We will reduce the clock divider to the minimum after the SD card is initialized
   spi_init(1, MODE0, F_DIV64);
   xprintf(PSTR("SPI hardware configured\n"));
 
+  _delay_ms(8000.0);
+
   // Initialize the FatFs
   xprintf(PSTR("Mounting FatFs...\n"));
-  fr = f_mount(&FatFs, "", 1);
+  fr = f_mount(&FatFs, "", 0);
   xputs(PSTR("f_mount returned: ")); PUT_RC(fr);
 
-  // Speed up the SPI Clock to maximum (now that SD card initialization is complete)
-  spi_set_clk_div(F_DIV2);
+  // initialize the logging
+  logging_enabled = (openLogger("CAN") == kStatus_Success);
 
   // Initialize the CAN hardware (MCP2515) (parameter is hard-coded for now)
-  if (mcp2515_init(0x40)) {
-	  xputs(PSTR("CAN interface configured\n"));
-  } else {
-	  xputs(PSTR("CAN interface initialization FAILED!\n"));
-  }
+//  if (mcp2515_init(0x40)) {
+//	  xputs(PSTR("CAN interface configured\n"));
+//  } else {
+//	  xputs(PSTR("CAN interface initialization FAILED!\n"));
+//  }
 
   uint16_t z = 0;
   uint8_t y = 0;
   while (1) {
-	  if (mcp2515_check_message()) {
-		  if (mcp2515_get_message(&g_canFrame)) {
-			  displayCanFrame(&g_canFrame);
-		  }
+
+//	  while (mcp2515_check_message()) {
+//		  if (mcp2515_get_message(&g_canFrame)) {
+//			  if (logging_enabled) {
+//				  logCanFrame(&g_canFrame);
+//			  }
+//			  displayCanFrame(&g_canFrame);
+//		  }
+//	  }
+
+	  if (logging_enabled) {
+		  logCanFrame(&g_canFrame);
 	  }
-	  if (!(z % 1000)) {
-		  uint8_t pid = 0;
-		  y = y % 10;
-		  switch (y) {
-		  case 0:
-			  pid = ENGINE_COOLANT_TEMP;
-			  break;
-		  case 1:
-			  pid = ENGINE_RPM;
-			  break;
-		  case 2:
-			  pid = VEHICLE_SPEED;
-			  break;
-		  case 3:
-			  pid = MAF_SENSOR;
-			  break;
-		  case 4:
-			  pid = O2_VOLTAGE;
-			  break;
-		  case 5:
-			  pid = THROTTLE;
-			  break;
-		  case 6:
-			  pid = 0x00; // Request PIDs 0x01-0x1F
-			  break;
-		  case 7:
-			  pid = 0x01; // Ready monitors
-			  break;
-		  case 8:
-			  pid = 0x04; // Calculated load
-			  break;
-		  case 9:
-			  pid = 0x20; // Request PIDs 0x21-0x3F
-			  break;
-		  }
-		  xprintf(PSTR("Requesting ECU data for pid: %u...\n"), pid);
-		  ecuRequest(pid);
-	  } else {
-		  if (!(z % 100)) {
-			  xputs(PSTR("."));
-//			  xprintf(PSTR("   UP: %d\n"), up);
-//			  xprintf(PSTR(" LEFT: %d\n"), left);
-//			  xprintf(PSTR(" DOWN: %d\n"), down);
-//			  xprintf(PSTR("RIGHT: %d\n"), right);
-//			  xprintf(PSTR("CLICK: %d\n"), click);
-		  }
+
+	  if (!(z % 100)) {
+
+		  xputs(PSTR("."));
+
 		  up = read_pin(portC, PINC1);
 		  if (!up && lastUp) {
 			  y++;
@@ -288,9 +209,11 @@ int main(void) {
 		  right = read_pin(portC, PINC5);
 
 	  }
-	  _delay_ms(5.0);
+	  _delay_ms(2.0);
 	  z++;
   }
+
+  closeLogger();
 
   return 0;
 }
